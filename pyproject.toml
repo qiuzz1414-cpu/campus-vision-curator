@@ -40,6 +40,11 @@ cvc = "cvc.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/cvc"]
 
+# 把仓库根的 recipes/ 打进 wheel 的 cvc/_recipes/，
+# 这样 `pip install` 之后的 `cvc init` 也能拿到完整模板，而不是退化成最小默认值。
+[tool.hatch.build.targets.wheel.force-include]
+"recipes" = "cvc/_recipes"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

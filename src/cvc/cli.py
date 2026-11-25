@@ -85,6 +85,23 @@ def version() -> None:
     print(f"campus-vision-curator {__version__}")
 
 
+def _find_template(name: str = "fruit_picking.yaml") -> Path | None:
+    """定位内置 recipe 模板。
+
+    两种安装形态要找的文件位置不同：
+    - wheel 安装：随包打入 `cvc/_recipes/`
+    - 源码 / editable 安装：仓库根的 `recipes/`
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in (
+        here / "_recipes" / name,
+        here.parent.parent / "recipes" / name,
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 @app.command()
 def init(
     recipe: str = RECIPE_OPT,
@@ -95,13 +112,24 @@ def init(
     if target.exists() and not force:
         typer.secho(f"recipe 已存在：{target}（加 --force 覆盖）", fg=typer.colors.YELLOW)
     elif not target.exists():
-        template = Path(__file__).parent.parent.parent / "recipes" / "fruit_picking.yaml"
         target.parent.mkdir(parents=True, exist_ok=True)
-        if template.exists():
+        template = _find_template()
+        if template is not None:
             shutil.copy(template, target)
+            typer.secho(f"已从模板创建 recipe：{target}", fg=typer.colors.GREEN)
         else:
-            target.write_text("project: my-dataset\nlabel:\n  categories: [cat, dog]\n", encoding="utf-8")
-        typer.secho(f"已创建 recipe：{target}", fg=typer.colors.GREEN)
+            target.write_text(
+                "project: my-dataset\n"
+                "workspace: workspace\n"
+                "input:\n  paths: [raw]\n"
+                "label:\n"
+                "  categories: [cat, dog]   # 改成你自己的类别\n"
+                "  distractors: []\n",
+                encoding="utf-8",
+            )
+            typer.secho(
+                f"未找到内置模板，已生成最小 recipe：{target}", fg=typer.colors.YELLOW
+            )
 
     cfg, _ = _load(str(target))
     cfg.ensure_dirs()

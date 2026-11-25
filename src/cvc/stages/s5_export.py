@@ -286,6 +286,16 @@ def run(cfg: Config, manifest: Manifest, clean: bool = True) -> dict:
     log.info(f"data.yaml → {cfg.dataset_dir / 'data.yaml'}")
     log.info(f"统计表   → {cfg.dataset_dir / 'stats.md'}")
 
+    # 空划分检查：数据量小时，小比例（如 test: 0.05）会四舍五入成 0 张，
+    # 训练跑完才发现"没有测试集"是很常见的困惑，主动提示
+    for split, n in written.items():
+        if n == 0:
+            log.warning(
+                f"⚠️ {split} 划分是空的（共 {len(eligible)} 张可用样本，"
+                f"比例 {cfg.export.split.get(split, 0):.0%}）。"
+                f"数据量小时先把比例调大，或直接用 val 当测试集。"
+            )
+
     # 类别覆盖检查：这是最容易踩的坑，主动报警
     train_classes = stats["splits"]["train"]["boxes_per_class"]
     missing = [n for n, c in train_classes.items() if c == 0]
