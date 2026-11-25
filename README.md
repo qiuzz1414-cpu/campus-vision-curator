@@ -316,4 +316,6 @@ campus-vision-curator/
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Zizhao Qiu
+
+欢迎拿去做课程作业、竞赛、毕设。如果它帮你省了几个小时，给个 star 就够了。

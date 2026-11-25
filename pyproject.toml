@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "轻量级视觉数据集策展流水线：从原始照片到 YOLO 可直接训练的干净数据集"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "campus-vision-curator contributors" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Zizhao Qiu" }]
 keywords = ["dataset", "yolo", "vlm", "autolabel", "curation", "coursework"]
 classifiers = [
     "Programming Language :: Python :: 3",
