@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "campus-vision-curator"
+version = "0.1.0"
+description = "轻量级视觉数据集策展流水线：从原始照片到 YOLO 可直接训练的干净数据集"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "campus-vision-curator contributors" }]
+keywords = ["dataset", "yolo", "vlm", "autolabel", "curation", "coursework"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "numpy>=1.24",
+    "opencv-python-headless>=4.9",
+    "imagehash>=4.3",
+    "tqdm>=4.66",
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+train = ["ultralytics>=8.3"]
+clip = ["open_clip_torch>=2.24", "torch>=2.1"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+cvc = "cvc.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cvc"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

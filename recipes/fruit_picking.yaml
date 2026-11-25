@@ -1,0 +1,135 @@
+# ============================================================================
+# 校园视觉数据集策展 · 配置模板
+#
+# 用法：cvc run -r recipes/fruit_picking.yaml
+# 原则：只改这个文件，不改代码。
+# ============================================================================
+
+project: fruit-picking-apple-lemon
+
+# 所有中间产物（manifest / 规范化图片 / 数据集 / 训练结果）都落在这里
+workspace: workspace
+
+
+# ---------------------------------------------------------------------------
+# 阶段一 · 输入
+# ---------------------------------------------------------------------------
+input:
+  # 原始素材目录（相对路径以**当前工作目录**为基准）。可以同时给多个。
+  paths:
+    - raw
+  # 视频抽帧频率（帧/秒）。1.0 表示每秒 1 帧，够用且不会爆量
+  video_fps: 1.0
+  # 统一缩放到最长边不超过该值。1600 已足够训练 640 输入
+  max_side: 1600
+  jpeg_quality: 95
+  recursive: true
+
+
+# ---------------------------------------------------------------------------
+# 阶段二 · 过滤与去重
+# ---------------------------------------------------------------------------
+filter:
+  # 拉普拉斯方差低于此值判定为模糊。清晰 >100，轻度虚焦 30~100，糊 <30
+  blur_threshold: 60.0
+  # 感知哈希汉明距离 <= 此值视为重复（0 完全相同，越小越严格）
+  phash_distance: 6
+  # 短边小于此值的图直接弃用（缩略图、截图）
+  min_side: 200
+
+  # CLIP 语义去重（可选，需要 pip install -e '.[clip]'）
+  # 用于捕捉"同一场景换了个角度"这种 pHash 抓不到的重复
+  clip:
+    enabled: false
+    threshold: 0.95
+    model: ViT-B-32
+    pretrained: laion2b_s34b_b79k
+
+
+# ---------------------------------------------------------------------------
+# 阶段三 · VLM 自动标注
+# ---------------------------------------------------------------------------
+label:
+  # 推理后端：openai_compat = 真实 VLM；mock = 生成假框，仅用于离线验证管道连通性
+  backend: openai_compat
+
+  # 任意 OpenAI 兼容端点。三选一：
+  #   本地 vLLM:   http://127.0.0.1:8000/v1      api_key: EMPTY
+  #   阿里百炼:     https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   硅基流动:     https://api.siliconflow.cn/v1
+  base_url: http://127.0.0.1:8000/v1
+  api_key: EMPTY
+
+  # 模型名必须与服务端 models 列表一致；不确定就先跑 `cvc doctor`
+  model: Qwen2.5-VL-7B-Instruct
+
+  # 坐标格式：auto | absolute | norm1000 | norm1
+  #   Qwen2.5-VL / GPT-4o   -> absolute
+  #   Qwen3-VL              -> norm1000
+  #   不确定先留 auto，日志里会打印每张图实际猜到的格式
+  # 生产环境建议写死，避免个别图猜错导致框偏移
+  bbox_format: auto
+
+  # 若服务端支持 response_format=json_object 可开启，能显著降低解析失败率
+  json_mode: false
+
+  concurrency: 4
+  timeout: 120.0
+  retries: 3
+  temperature: 0.0
+  max_tokens: 1024
+
+  # 发给模型前把图缩到最长边 <= 该值，省带宽也省 token
+  image_max_side: 1024
+
+  # ★ 只标这两类（本组作业指定的水果）
+  categories:
+    - apple
+    - lemon
+
+  # ★ 画面里可能出现、但必须忽略的干扰物。
+  #   写进去能明显减少误标——VLM 默认很热情，什么都想框
+  distractors:
+    - pear
+    - orange
+    - guava
+    - tomato
+    - leaf
+    - hand
+
+  # 低于此置信度的框直接丢弃
+  min_conf: 0.25
+  # 低于此置信度的样本打上 needs_review，进入人工复核队列
+  review_conf: 0.6
+
+  # 追加到提示词末尾的额外要求，例如：
+  # "Pay special attention to partially occluded lemons behind leaves."
+  prompt_extra: ""
+
+
+# ---------------------------------------------------------------------------
+# 阶段五 · 导出
+# ---------------------------------------------------------------------------
+export:
+  split:
+    train: 0.8
+    val: 0.15
+    test: 0.05
+  seed: 42
+  # 负样本占 train 正样本数的比例。0.1 表示掺 10% 背景图
+  negative_ratio: 0.1
+  copy_images: true
+
+
+# ---------------------------------------------------------------------------
+# 阶段六 · 训练
+# ---------------------------------------------------------------------------
+train:
+  enabled: true
+  model: yolov8n.pt          # n/s/m/l/x，数据集小时 n 或 s 就够
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: auto               # auto | cpu | 0 | 0,1
+  patience: 30
+  workers: 4

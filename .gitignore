@@ -1,0 +1,38 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# ---- Tooling ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---- Project runtime artifacts ----
+workspace/
+runs/
+*.pt
+*.onnx
+*.engine
+
+# ---- Data (never commit datasets) ----
+raw/
+dataset/
+images/
+labels/
+overlays/
+rejects/
+manifests/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
