@@ -140,9 +140,22 @@ def run(cfg: Config, manifest: Manifest, force: bool = False) -> dict:
     # ---- 闸门 2：pHash 去重 ----
     survivors = [r for r in targets if r.reject_reason is None]
     n_dup = 0
-    kept_hashes: list[tuple[str, str]] = []  # (rec_id, hash_str)
 
     import imagehash
+
+    # 用已落库的历史哈希做种子。否则每次运行 kept_hashes 都从空开始，
+    # 新图只会和"本轮处理过的"比较；上一次已 cleaned 的记录虽然带 phash，
+    # 却完全不参与比较，增量去重形同虚设。
+    kept: list[tuple[str, imagehash.ImageHash]] = []
+    for r in manifest.records:
+        if r.id in {t.id for t in targets} or not r.phash:
+            continue
+        try:
+            kept.append((r.id, imagehash.hex_to_hash(r.phash)))
+        except (ValueError, TypeError):
+            log.debug(f"{r.id} 的 phash 无法解析，忽略")
+
+    log.info(f"以 {len(kept)} 条历史哈希为基准做增量去重")
 
     for rec in survivors:
         h = _phash(cfg, rec)
@@ -150,11 +163,13 @@ def run(cfg: Config, manifest: Manifest, force: bool = False) -> dict:
             continue
         rec.phash = h
 
+        # hex→ImageHash 只解析一次，避免在 O(n²) 内层循环里反复 parse
+        h_hash = imagehash.hex_to_hash(h)
+
         # 线性比对在万级数据量下够用；百万级再换 BK-tree
         dup_of = None
-        for kept_id, kept_h in kept_hashes:
-            dist = imagehash.hex_to_hash(h) - imagehash.hex_to_hash(kept_h)
-            if dist <= cfg.filter.phash_distance:
+        for kept_id, kept_hash in kept:
+            if h_hash - kept_hash <= cfg.filter.phash_distance:
                 dup_of = kept_id
                 break
 
@@ -162,36 +177,52 @@ def run(cfg: Config, manifest: Manifest, force: bool = False) -> dict:
             _reject(cfg, rec, f"duplicate_of_{dup_of}")
             n_dup += 1
         else:
-            kept_hashes.append((rec.id, h))
+            kept.append((rec.id, h_hash))
 
     log.info(f"感知哈希重复 {n_dup} 条")
+
+    # 此刻 manifest 与磁盘已一致（_reject 会真的移动文件），先落盘一次。
+    # 否则后面 CLIP 阶段一旦抛异常（比如模型下载失败），manifest 还停在旧路径，
+    # 下一次运行就会指向不存在的文件。
+    manifest.save()
 
     # ---- 闸门 3：CLIP 语义去重（可选）----
     n_clip = 0
     if cfg.filter.clip.enabled:
-        pool = [r for r in survivors if r.reject_reason is None]
-        embs = _clip_embeddings(cfg, pool)
-        seen: list[tuple[str, np.ndarray]] = []
-        for rec in pool:
-            vec = embs.get(rec.id)
-            if vec is None:
-                continue
-            dup_of = None
-            for kept_id, kept_vec in seen:
-                if float(np.dot(vec, kept_vec)) >= cfg.filter.clip.threshold:
-                    dup_of = kept_id
-                    break
-            if dup_of:
-                _reject(cfg, rec, f"clip_dup_of_{dup_of}")
-                n_clip += 1
-            else:
-                seen.append((rec.id, vec))
-        log.info(f"CLIP 语义重复 {n_clip} 条")
+        try:
+            pool = [r for r in survivors if r.reject_reason is None]
+            embs = _clip_embeddings(cfg, pool)
+            seen: list[tuple[str, np.ndarray]] = []
+            for rec in pool:
+                vec = embs.get(rec.id)
+                if vec is None:
+                    continue
+                dup_of = None
+                for kept_id, kept_vec in seen:
+                    if float(np.dot(vec, kept_vec)) >= cfg.filter.clip.threshold:
+                        dup_of = kept_id
+                        break
+                if dup_of:
+                    _reject(cfg, rec, f"clip_dup_of_{dup_of}")
+                    n_clip += 1
+                else:
+                    seen.append((rec.id, vec))
+            log.info(f"CLIP 语义重复 {n_clip} 条")
+        except Exception as exc:
+            # 语义去重是增强项，失败不该让整个阶段前功尽弃
+            log.warning(f"CLIP 去重失败，已跳过（其余结果保留）：{exc}")
+        finally:
+            manifest.save()
 
     # ---- 收尾 ----
     for rec in targets:
         if rec.reject_reason is None:
-            rec.status = "cleaned"
+            # 只有真正没往下游走过的记录才回到 cleaned。
+            # 早期版本对所有 targets 无条件写 cleaned，而 `--force` 会把
+            # 已 labeled/exported 的记录也带进来，结果它们的标注还在、
+            # 状态却退回 cleaned，s5 只收 labeled/exported → 样本凭空消失。
+            if rec.status == "ingested":
+                rec.status = "cleaned"
             rec.unflag("blurry")
 
     manifest.save()

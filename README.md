@@ -66,6 +66,9 @@ cd campus-vision-curator
 # 推荐 uv；也可以 pip install -e .
 uv pip install -e ".[train]"
 
+# 用 iPhone 拍的（.heic）再加一个解码器
+uv pip install -e ".[train,heic]"
+
 # 1. 初始化工作区
 cvc init -r recipes/fruit_picking.yaml
 
@@ -182,6 +185,8 @@ label:
 bash scripts/serve_vllm.sh                                  # 默认 7B，约 16GB 显存
 bash scripts/serve_vllm.sh Qwen/Qwen2.5-VL-3B-Instruct      # 显存不够降级
 ```
+
+脚本默认只监听 `127.0.0.1`。vLLM 的 OpenAI 兼容端点**没有鉴权**，绑 `0.0.0.0` 等于把裸端点暴露给整个局域网。确需跨机器访问时显式指定 `VLLM_HOST=0.0.0.0`。
 
 ---
 

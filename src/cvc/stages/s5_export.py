@@ -43,9 +43,15 @@ def _eligible(manifest: Manifest) -> list:
 def stratified_split(
     positives: list, ratios: dict[str, float], seed: int
 ) -> dict[str, list]:
-    """按主类别做分层划分，保证 train 覆盖所有类别。
+    """按类别分层划分，目标是「每个类别都出现在 train 里」。
 
-    「主类别」= 该图框数最多的类。混合图（同时有苹果和柠檬）归到框多的一类。
+    做法分两步：
+    1. 按**主类别**（该图框数最多的类）分桶并各自划分，保证常见的混合分布均匀；
+    2. 划分完成后**逐个类别复查**：若某类在 train 中为零，从 val/test 里
+       调一张包含该类的图回 train。
+
+    第 2 步是必须的。只按主类别分桶并不能保证覆盖——一个从不占多数的类
+    （柠檬总是和更多苹果同框）不会形成独立桶，可能整个落到 val/test。
     """
     rng = random.Random(seed)
 
@@ -57,6 +63,7 @@ def stratified_split(
         dominant = max(counts.items(), key=lambda kv: kv[1])[0] if counts else "__none__"
         buckets[dominant].append(rec)
 
+    # train 一定存在（配置层已强制），val/test 可能不配
     out: dict[str, list] = {k: [] for k in ratios}
 
     for recs in buckets.values():
@@ -65,7 +72,10 @@ def stratified_split(
 
         # 小类别：至少保证 1 张进 train、1 张进 val（如果有 2 张以上）
         n_train = max(1, int(round(n * ratios.get("train", 0.8))))
-        n_val = max(1, int(round(n * ratios.get("val", 0.15)))) if n >= 3 else 0
+        # 只有确实要产出 val 时才预留名额，否则会白白吞掉本该进 train 的样本
+        n_val = (
+            max(1, int(round(n * ratios.get("val", 0.15)))) if ("val" in out and n >= 3) else 0
+        )
         n_train = min(n_train, n - n_val)
 
         out["train"].extend(recs[:n_train])
@@ -76,19 +86,44 @@ def stratified_split(
         if "test" in out:
             out["test"].extend(recs[cursor:])
 
+    # ---- 第 2 步：兜底保证覆盖 ----
+    def _classes(recs: list) -> set[str]:
+        return {b.cls for r in recs for b in r.boxes}
+
+    train_classes = _classes(out["train"])
+    all_classes = _classes(positives)
+
+    for cls in sorted(all_classes - train_classes):
+        # 从 val 优先、test 其次，找一张含该类的图挪进 train
+        for donor in [k for k in ("val", "test") if k in out]:
+            pool = out[donor]
+            d = next(
+                (i for i, r in enumerate(pool) if any(b.cls == cls for b in r.boxes)),
+                None,
+            )
+            if d is None:
+                continue
+            moved = pool.pop(d)
+            out["train"].append(moved)
+            log.warning(
+                f"类别 `{cls}` 原本不在 train 中，已从 {donor} 调整 1 张（{moved.id}）回 train"
+            )
+            break
+        else:
+            log.warning(f"类别 `{cls}` 在整个数据集中只出现在无法调整的划分里，请补充该类的图片")
+
     return out
 
 
 def _sample_negatives(
-    eligible: list, positives: set[str], ratios: dict[str, float], seed: int
+    eligible: list, positives: set[str], n_train_pos: int, ratio: float, seed: int
 ) -> dict[str, list]:
     """从未标注到目标的图里抽负样本，掺进 train 和 val。"""
     rng = random.Random(seed + 1)
     pool = [r for r in eligible if r.id not in positives and not r.has_target]
     rng.shuffle(pool)
 
-    n_train_pos = len(ratios["_train_pos"])
-    n_neg = int(n_train_pos * ratios["_negative_ratio"])
+    n_neg = int(n_train_pos * ratio)
     if n_neg <= 0 or not pool:
         return {"train": [], "val": []}
 
@@ -231,9 +266,14 @@ def run(cfg: Config, manifest: Manifest, clean: bool = True) -> dict:
     ratios = dict(cfg.export.split)
     positives_split = stratified_split(positives, ratios, cfg.export.seed)
 
-    # 负样本按 train 正样本数×比例抽样
-    extra = {"_train_pos": positives_split["train"], "_negative_ratio": cfg.export.negative_ratio}
-    negatives = _sample_negatives(eligible, {r.id for r in positives}, extra, cfg.export.seed)
+    # 负样本按 train 正样本数 × 比例抽样
+    negatives = _sample_negatives(
+        eligible,
+        {r.id for r in positives},
+        len(positives_split["train"]),
+        cfg.export.negative_ratio,
+        cfg.export.seed,
+    )
 
     splits: dict[str, list] = {}
     for split in ratios:

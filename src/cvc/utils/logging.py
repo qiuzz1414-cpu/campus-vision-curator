@@ -19,10 +19,21 @@ _COLORS = {
 
 class _Formatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        color = _COLORS.get(record.levelname, "")
-        reset = _COLORS["RESET"] if color and _use_color() else ""
+        # 颜色必须整体开关。早期版本无条件拼接 color、只对 reset 判断 _use_color()，
+        # 结果重定向到文件或设置 NO_COLOR 时每行都带一段永不闭合的 ANSI 转义码。
+        use_color = _use_color()
+        color = _COLORS.get(record.levelname, "") if use_color else ""
+        reset = _COLORS["RESET"] if color else ""
         prefix = f"{color}{record.levelname:<7}{reset}"
-        return f"{prefix} {record.getMessage()}"
+        msg = f"{prefix} {record.getMessage()}"
+
+        # 必须自己带上堆栈：整个 format 被覆盖后，基类里渲染 exc_info 的逻辑
+        # 不再被调用，logger.exception() 会静默丢掉 traceback。
+        if record.exc_info:
+            msg = f"{msg}\n{self.formatException(record.exc_info)}"
+        if record.stack_info:
+            msg = f"{msg}\n{self.formatStack(record.stack_info)}"
+        return msg
 
 
 def _use_color() -> bool:

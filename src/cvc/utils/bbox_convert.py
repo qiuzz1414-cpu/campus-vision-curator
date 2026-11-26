@@ -20,14 +20,17 @@ from collections.abc import Sequence
 
 FORMATS = ("auto", "absolute", "norm1000", "norm1")
 _EPS = 1e-6
+# norm1 的容差：模型常给出 1.02、0.99 这种轻微越界的归一化值。
+# 卡在 1.0 上会把它们误判成绝对像素，于是整张图的框塌成原点附近的几个像素。
+NORM1_TOLERANCE = 0.1
 
 
 def detect_format(values: Sequence[float], img_w: int, img_h: int) -> str:
     """猜测坐标格式。仅用于 `auto` 模式，猜错时调用方应打印警告。
 
     判定顺序：
-    1. 全部 <= 1.0001            -> norm1
-    2. 峰值 > 1000.5             -> absolute（归一化不可能给出这么大的数）
+    1. 全部 <= 1 + 容差        -> norm1（容忍轻微越界的归一化输出）
+    2. 峰值 > 1000.5           -> absolute（归一化不可能给出这么大的数）
     3. 峰值在 (1, 1000] 之间时，两种解释都可能，用**可行性**裁决：
        若按绝对像素解释会越出图像边界，则只能是 norm1000；
        否则按绝对像素解释（提示词里声明的默认格式）。
@@ -37,7 +40,7 @@ def detect_format(values: Sequence[float], img_w: int, img_h: int) -> str:
         return "absolute"
 
     peak = max(vals)
-    if peak <= 1.0001:
+    if peak <= 1.0 + NORM1_TOLERANCE:
         return "norm1"
     if peak > 1000.5:
         return "absolute"
@@ -146,18 +149,20 @@ def clamp_box(
     return x1, y1, x2, y2
 
 
-def dedup_boxes(
-    boxes: list[tuple[str, tuple[float, float, float, float]]],
-    iou_threshold: float = 0.85,
-) -> list[tuple[str, tuple[float, float, float, float]]]:
-    """同一类别的重复框去重（VLM 常见问题：同一物体报两次）。保留面积较大的。"""
-    kept: list[tuple[str, tuple[float, float, float, float]]] = []
-    for cls, box in sorted(
-        boxes,
-        key=lambda kv: (kv[1][2] - kv[1][0]) * (kv[1][3] - kv[1][1]),
+def dedup_boxes(items: list, iou_threshold: float = 0.85) -> list:
+    """同一类别的重复框去重（VLM 常见问题：同一物体报两次）。保留面积较大的。
+
+    `items` 的每一项是 `(cls, box_xyxy, *rest)`，`rest` 原样带回——
+    这样调用方附加的置信度等信息不会在去重时丢失。
+    """
+    kept: list = []
+    for item in sorted(
+        items,
+        key=lambda it: (it[1][2] - it[1][0]) * (it[1][3] - it[1][1]),
         reverse=True,
     ):
-        if any(cls == kc and iou(box, kb) > iou_threshold for kc, kb in kept):
+        cls, box = item[0], item[1]
+        if any(cls == k[0] and iou(box, k[1]) > iou_threshold for k in kept):
             continue
-        kept.append((cls, box))
+        kept.append(item)
     return kept

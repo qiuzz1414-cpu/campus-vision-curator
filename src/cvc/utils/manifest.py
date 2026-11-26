@@ -173,6 +173,13 @@ class Manifest:
                     rec = Record.from_dict(json.loads(line))
                 except (json.JSONDecodeError, TypeError) as exc:
                     raise ValueError(f"{self.path}:{lineno} 解析失败：{exc}") from exc
+                if rec.id in self._index:
+                    # manifest 是给人看的 JSONL，可能被手工编辑过。
+                    # 重复 id 会让 _index 静默指向最后一条，前面那条永远改不到。
+                    raise ValueError(
+                        f"{self.path}:{lineno} 记录 id 重复：{rec.id}。"
+                        "请手工修正后重试。"
+                    )
                 self.records.append(rec)
                 self._index[rec.id] = rec
         return self

@@ -1,5 +1,7 @@
 [build-system]
-requires = ["hatchling"]
+# 必须 >= 1.27：本项目用了 PEP 639 的 license = "MIT" 与 license-files。
+# 不设下界时，若本机缓存了旧版 hatchling，构建会以一条难以理解的元数据错误失败。
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -22,8 +24,10 @@ dependencies = [
     "typer>=0.12",
     "pyyaml>=6.0",
     "pillow>=10.0",
-    "numpy>=1.24",
-    "opencv-python-headless>=4.9",
+    # NumPy 2.x 改了 C ABI，opencv-python-headless 4.9 的 wheel 是照 NumPy 1.x 编译的，
+    # 混装后 import cv2 会直接崩。这里锁住下界让 pip 解出兼容组合。
+    "numpy>=1.26,<3",
+    "opencv-python-headless>=4.10",
     "imagehash>=4.3",
     "tqdm>=4.66",
     "openai>=1.40",
@@ -32,6 +36,8 @@ dependencies = [
 [project.optional-dependencies]
 train = ["ultralytics>=8.3"]
 clip = ["open_clip_torch>=2.24", "torch>=2.1"]
+# iPhone 照片是 HEIC，Pillow 自己解不了
+heic = ["pillow-heif>=0.16"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
@@ -42,8 +48,10 @@ packages = ["src/cvc"]
 
 # 把仓库根的 recipes/ 打进 wheel 的 cvc/_recipes/，
 # 这样 `pip install` 之后的 `cvc init` 也能拿到完整模板，而不是退化成最小默认值。
+# scripts/ 同理：`cvc doctor` 会提示用户运行 serve_vllm.sh，那个文件必须在。
 [tool.hatch.build.targets.wheel.force-include]
 "recipes" = "cvc/_recipes"
+"scripts" = "cvc/_scripts"
 
 [tool.ruff]
 line-length = 100

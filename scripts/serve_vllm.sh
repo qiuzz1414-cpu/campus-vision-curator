@@ -9,7 +9,10 @@
 set -euo pipefail
 
 MODEL="${1:-Qwen/Qwen2.5-VL-7B-Instruct}"
-HOST="${VLLM_HOST:-0.0.0.0}"
+# 默认只监听本机：vLLM 的 OpenAI 兼容端点**没有鉴权**，
+# 绑 0.0.0.0 等于把裸端点暴露到整个局域网（校园网/宿舍网尤其危险）。
+# 确需跨机器访问时显式指定：VLLM_HOST=0.0.0.0 bash scripts/serve_vllm.sh
+HOST="${VLLM_HOST:-127.0.0.1}"
 PORT="${VLLM_PORT:-8000}"
 
 # 显存不足时按顺序降级：

@@ -66,6 +66,10 @@ async def _label_one(
             log.warning(f"{rec.id} 读图失败：{exc}")
             rec.status = "labeled"
             rec.meta["label_error"] = f"read_error: {exc}"
+            # 必须打 label_failed：否则 s5 会把这张读不出来的图当成"无目标的
+            # 负样本"送进训练集，等于把坏数据洗成正常数据。
+            rec.flag("label_failed")
+            rec.flag("needs_review")
             stats.failed += 1
             return
 
@@ -96,18 +100,28 @@ async def _label_one(
                 payload = extract_json(text)
                 objs = normalize_objects(payload)
 
-                boxes: list[tuple[str, tuple[float, float, float, float]]] = []
-                fmt_used = None
+                # 一个响应只判一次坐标格式。
+                # 若逐个 object 独立猜，同一张图里可能一半按 absolute、
+                # 一半按 norm1000 解析，框会出现整片偏移。
+                fmt_used = cfg.label.bbox_format
+                if fmt_used == "auto":
+                    fmt_used = _detect_response_format(objs, sent_w, sent_h)
+
+                sx = rec.width / sent_w
+                sy = rec.height / sent_h
+
+                boxes: list[tuple[str, tuple[float, float, float, float], float]] = []
+                dropped_low = 0
                 for obj in objs:
                     label = _match_category(obj.label, cfg.label.categories)
                     if label is None:
                         continue  # 模型标了不在目标里的类别，丢弃
 
-                    fmt_used = (
-                        cfg.label.bbox_format
-                        if cfg.label.bbox_format != "auto"
-                        else detect_format(obj.bbox, sent_w, sent_h)
-                    )
+                    # ★ min_conf 在这里真正生效
+                    if obj.confidence < cfg.label.min_conf:
+                        dropped_low += 1
+                        continue
+
                     try:
                         px = to_pixels(obj.bbox, sent_w, sent_h, fmt_used)
                     except ValueError as exc:
@@ -115,14 +129,12 @@ async def _label_one(
                         continue
 
                     # 从「发给模型的尺寸」映射回「原图尺寸」
-                    sx = rec.width / sent_w
-                    sy = rec.height / sent_h
                     px = (px[0] * sx, px[1] * sy, px[2] * sx, px[3] * sy)
 
                     clipped = clamp_box(px, rec.width, rec.height)
                     if clipped is None:
                         continue
-                    boxes.append((label, clipped))
+                    boxes.append((label, clipped, obj.confidence))
 
                 boxes = dedup_boxes(boxes)
 
@@ -133,19 +145,26 @@ async def _label_one(
                         y1=b[1],
                         x2=b[2],
                         y2=b[3],
-                        conf=1.0,
+                        # ★ 保留模型给的置信度，不再写死 1.0
+                        conf=conf,
                         source="auto",
                     )
-                    for c, b in boxes
+                    for c, b, conf in boxes
                 ]
                 rec.status = "labeled"
                 rec.meta["bbox_format_used"] = fmt_used
                 rec.meta["label_model"] = cfg.label.model
-                rec.unflag("label_failed")
+                if dropped_low:
+                    rec.meta["dropped_low_conf"] = dropped_low
+
+                # 清掉上一次运行可能残留的标记，否则重新标注后旧状态会继续生效
+                for stale in ("label_failed", "no_target", "needs_review", "mock_label"):
+                    rec.unflag(stale)
 
                 if not rec.boxes:
                     rec.flag("no_target")
                     stats.empty += 1
+                # ★ review_conf 在这里真正生效
                 if any(b.conf < cfg.label.review_conf for b in rec.boxes):
                     rec.flag("needs_review")
                     stats.low_conf += 1
@@ -162,12 +181,34 @@ async def _label_one(
                     await asyncio.sleep(backoff)
 
         rec.status = "labeled"
-        rec.meta["label_error"] = str(last_err)[:300]
+        # retries 已由配置层保证 >= 1，但仍兜底：last_err 为 None 时写出
+        # "None" 这种错误信息对学生毫无帮助
+        rec.meta["label_error"] = (str(last_err) if last_err else "no attempt made")[:300]
         rec.flag("label_failed")
         rec.flag("needs_review")
         stats.failed += 1
         if len(stats.errors) < 5:
             stats.errors.append(f"{rec.id}: {last_err}")
+
+
+def _detect_response_format(objs, sent_w: int, sent_h: int) -> str:
+    """为一整个响应判定一次坐标格式。
+
+    多目标取"多数票"：逐 object 判断一致时直接用；不一致时以出现次数最多的为准，
+    并打警告——同一张图里混着两种坐标格式，本身就说明模型的输出不可靠。
+    """
+    votes: dict[str, int] = {}
+    for obj in objs:
+        fmt = detect_format(obj.bbox, sent_w, sent_h)
+        votes[fmt] = votes.get(fmt, 0) + 1
+    if not votes:
+        return "absolute"
+    if len(votes) > 1:
+        log.warning(
+            f"同一响应内坐标格式不一致：{votes}；按多数处理。"
+            "建议在 recipe 里把 bbox_format 写死（auto 只用于首次探测）。"
+        )
+    return max(votes.items(), key=lambda kv: kv[1])[0]
 
 
 def _match_category(label: str, categories: list[str]) -> str | None:
@@ -177,9 +218,17 @@ def _match_category(label: str, categories: list[str]) -> str | None:
         c = cat.strip().lower().replace("_", " ").replace("-", " ")
         if norm == c or norm.rstrip("s") == c.rstrip("s"):
             return cat
-    # 模型有时会返回 "a red apple" 这种短语
-    for cat in categories:
-        if cat.strip().lower() in norm:
+
+    # 模型有时会返回 "a red apple" 这种短语。这里必须按**词边界**匹配：
+    # 直接 `c in norm` 会让类别 "pea" 命中模型输出 "peach"，
+    # 把完全无关的物体混进数据集。最长优先，避免 "apple" 抢先匹配 "apple pear"。
+    tokens = set(norm.split())
+    for cat in sorted(categories, key=len, reverse=True):
+        c = cat.strip().lower().replace("_", " ").replace("-", " ")
+        if " " in c:
+            if f" {c} " in f" {norm} ":
+                return cat
+        elif c in tokens or c.rstrip("s") in tokens:
             return cat
     return None
 

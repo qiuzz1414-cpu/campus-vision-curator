@@ -134,14 +134,20 @@ def build_html_report(cfg: Config, manifest: Manifest) -> Path:
         "需人工复核": [],
         "模型判定无目标（负样本）": [],
         "标注失败": [],
+        "尚未标注": [],
         "正常": [],
     }
 
     for rec in manifest.records:
         if not rec.is_usable:
             continue
+        labeled = rec.status in ("labeled", "exported")
         if "label_failed" in rec.flags:
             groups["标注失败"].append(rec)
+        elif not labeled:
+            # 还没跑过 label（例如 `cvc label --limit 10` 试跑剩下的）。
+            # 早期版本会把它归到"模型判定无目标"，让人误以为模型看过这些图。
+            groups["尚未标注"].append(rec)
         elif rec.needs_review:
             groups["需人工复核"].append(rec)
         elif not rec.has_target:
@@ -183,8 +189,13 @@ def build_html_report(cfg: Config, manifest: Manifest) -> Path:
         parts.append('<div class="grid">')
         for rec in recs[:400]:  # 单页上限，避免浏览器卡死
             overlay = cfg.overlays_dir / f"{rec.id}.jpg"
-            thumb_rel = f"overlays/{rec.id}.jpg" if overlay.exists() else f"images/{Path(rec.image).name}"
-            parts.append(_card(rec, f"overlays/{rec.id}.jpg", thumb_rel))
+            # 叠加图可能生成失败（draw_overlay 抛异常时被跳过）。
+            # 此时缩略图和链接都要回退到原图，否则报告里是一堆死链。
+            if overlay.exists():
+                thumb_rel = link_rel = f"overlays/{rec.id}.jpg"
+            else:
+                thumb_rel = link_rel = f"images/{Path(rec.image).name}"
+            parts.append(_card(rec, link_rel, thumb_rel))
         parts.append("</div>")
         if len(recs) > 400:
             parts.append(f'<p class="empty">仅显示前 400 张，共 {len(recs)} 张。</p>')
@@ -322,12 +333,28 @@ def import_review(cfg: Config, manifest: Manifest) -> dict:
         for b in boxes:
             b.source = "human"
 
-        if len(boxes) == len(rec.boxes) and all(
-            abs(a.x1 - b.x1) < 0.5 and abs(a.y1 - b.y1) < 0.5
-            and abs(a.x2 - b.x2) < 0.5 and abs(a.y2 - b.y2) < 0.5
-            for a, b in zip(rec.boxes, boxes, strict=False)
-        ):
-            continue  # 没改过，不重复计数
+        # 判断"人工是否真的改动过"。必须同时比坐标**和类别**：
+        # 复核时最常见的修正就是把 VLM 认错的类别改对（苹果↔柠檬），
+        # 框位置往往一点不动。早期版本只比坐标，这类修正会被当成 no-op 丢弃。
+        def _same(a: Box, b: Box) -> bool:
+            return (
+                a.cls == b.cls
+                and abs(a.x1 - b.x1) < 0.5
+                and abs(a.y1 - b.y1) < 0.5
+                and abs(a.x2 - b.x2) < 0.5
+                and abs(a.y2 - b.y2) < 0.5
+            )
+
+        unchanged = len(boxes) == len(rec.boxes) and all(
+            _same(a, b) for a, b in zip(rec.boxes, boxes, strict=False)
+        )
+
+        # 若这张图本来就有 <空 与 <空 之外的情况，unchanged 已经是 False。
+        # 但要注意：当 rec.boxes 和 boxes 都为空时 all() 返回 True，
+        # 于是"复核员确认这张图确实没有目标"会被当成没改过而 continue，
+        # needs_review 永远清不掉。所以空集合要单独放行。
+        if unchanged and rec.boxes:
+            continue  # 确实没改过，不重复计数
 
         rec.boxes = boxes
         rec.unflag("needs_review")
